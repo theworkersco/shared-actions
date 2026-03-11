@@ -1,0 +1,102 @@
+name: 'Telegram Notify'
+description: 'Send deployment status notifications to Telegram'
+
+inputs:
+  telegram_bot_token:
+    description: 'Telegram Bot Token'
+    required: true
+  telegram_chat_id:
+    description: 'Telegram Chat ID'
+    required: true
+  status:
+    description: 'Deployment status (success, failure, cancelled)'
+    required: true
+  project_name:
+    description: 'Project name'
+    required: true
+  environment:
+    description: 'Deployment environment (prod, staging, etc.)'
+    required: false
+    default: 'prod'
+  extra_info:
+    description: 'Additional info to include in the message'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Send Telegram Notification
+      shell: bash
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ inputs.telegram_bot_token }}
+        TELEGRAM_CHAT_ID: ${{ inputs.telegram_chat_id }}
+        STATUS: ${{ inputs.status }}
+        PROJECT_NAME: ${{ inputs.project_name }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        EXTRA_INFO: ${{ inputs.extra_info }}
+        # Fallback: head_commit.message for push, empty for workflow_dispatch
+        COMMIT_MSG_RAW: ${{ github.event.head_commit.message || 'Manual trigger' }}
+        COMMIT_SHA: ${{ github.sha }}
+        ACTOR: ${{ github.actor }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        # Status emoji and text
+        case "$STATUS" in
+          success)
+            EMOJI="✅"
+            STATUS_TEXT="Başarılı"
+            ;;
+          failure)
+            EMOJI="❌"
+            STATUS_TEXT="Başarısız"
+            ;;
+          cancelled)
+            EMOJI="⚠️"
+            STATUS_TEXT="İptal Edildi"
+            ;;
+          *)
+            EMOJI="ℹ️"
+            STATUS_TEXT="$STATUS"
+            ;;
+        esac
+
+        # Short SHA and sanitize commit message for HTML (escape <, >, &)
+        SHORT_SHA="${COMMIT_SHA:0:7}"
+        COMMIT_MSG=$(echo "$COMMIT_MSG_RAW" | head -1)
+        COMMIT_MSG_SAFE=$(echo "$COMMIT_MSG" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+        [ -z "$COMMIT_MSG_SAFE" ] && COMMIT_MSG_SAFE="Manual trigger"
+
+        # Build HTML message
+        MESSAGE="${EMOJI} <b>${PROJECT_NAME}</b> — ${STATUS_TEXT}
+
+        📦 <b>Ortam:</b> ${ENVIRONMENT}
+        🌿 <b>Branch:</b> ${BRANCH}
+        🔗 <b>Commit:</b> <a href=\"${RUN_URL}\">${SHORT_SHA}</a> — ${COMMIT_MSG_SAFE}
+        👤 <b>Deployer:</b> ${ACTOR}
+        📅 <b>Zaman:</b> $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+        if [ -n "$EXTRA_INFO" ]; then
+          EXTRA_SAFE=$(echo "$EXTRA_INFO" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+          MESSAGE="${MESSAGE}
+
+        📝 ${EXTRA_SAFE}"
+        fi
+
+        # Add links line
+        MESSAGE="${MESSAGE}
+
+        <a href=\"${RUN_URL}\">Actions Run</a> | <a href=\"${COMMIT_URL}\">Commit</a>"
+
+        # Send via Telegram API using jq for safe JSON encoding
+        PAYLOAD=$(jq -n \
+          --arg chat_id "$TELEGRAM_CHAT_ID" \
+          --arg text "$MESSAGE" \
+          '{chat_id: $chat_id, text: $text, parse_mode: "HTML", disable_web_page_preview: true}')
+
+        curl -s -X POST \
+          "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          -H "Content-Type: application/json" \
+          -d "$PAYLOAD"
